@@ -1,0 +1,77 @@
+#!/bin/bash
+#
+# Save this script as /usr/lib/systemd/system-sleep/10-battery-drainage  and make it executable
+# Script stores raw data in /var/log/battery-drainage.log and displays battery drainage statistics in kernel messages
+# 
+# License: LGPL
+# Copyrught 2024, vadik likholstov <vadikas@gmail.com> 
+#
+
+LOG_FILE="/var/log/battery-drainage.log"
+
+calculate_battery_percentage() {
+    energy_now=$(cat /sys/class/power_supply/qcom-battmgr-bat/energy_now)
+    energy_full=$(cat /sys/class/power_supply/qcom-battmgr-bat/energy_full)
+    percentage=$(echo "scale=2; $energy_now * 100 / $energy_full" | bc)
+    echo $percentage
+}
+
+calculate_drainage() {
+	# read  start and end times and read them from stdin
+	{
+	 read -r startlog
+	 read -r endlog
+	} < <(tail -n 2 "$LOG_FILE")
+
+	# Extract time in the format HH:MM:SS
+	startTime=$(echo $startlog | grep -oP '\b\d{2}:\d{2}:\d{2}\b')
+
+	# Extract battery percentage
+	startPercentage=$(echo $startlog | grep -oP '\d{2,}\.\d+')
+
+
+	# Extract time in the format HH:MM:SS
+	endTime=$(echo $endlog | grep -oP '\b\d{2}:\d{2}:\d{2}\b')
+
+	# Extract battery percentage
+	endPercentage=$(echo $endlog | grep -oP '\d{2,}\.\d+')
+
+
+
+	# Convert start and end times to seconds since the epoch (1970-01-01 00:00:00 UTC)
+	today=$(date +%Y-%m-%d)
+	startEpoch=$(date +%s -d "$today $startTime")
+	endEpoch=$(date +%s -d "$today $endTime")
+
+	# Calculate the difference in seconds
+	if [ $endEpoch -ge $startEpoch ]; then
+    		# Event does not cross midnight
+    		diffSeconds=$((endEpoch - startEpoch))
+	else
+    		# Event crosses midnight, add 24 hours (in seconds) to the end time for calculation
+    		diffSeconds=$((86400 - startEpoch + endEpoch))
+	fi
+
+	# Convert the difference in seconds back to HH:MM:SS format
+	hours=$((diffSeconds / 3600))
+	minutes=$(( (diffSeconds % 3600) / 60 ))
+	seconds=$((diffSeconds % 60))
+
+	discharge=$(echo "$startPercentage - $endPercentage" | bc)
+
+	drainRate=$(echo "$discharge * 3600 / $diffSeconds " | bc)
+
+	# Output the length of the event in HH:MM:SS format
+	printf "Sleep time: %02d:%02d:%02d Discharged %s %%  Drain rate %s %%/hour \n" $hours $minutes $seconds $discharge $drainRate 
+
+}
+
+case $1 in
+    pre)
+        echo "$(date): Suspending. Battery level: $(calculate_battery_percentage)% " >> $LOG_FILE
+        ;;
+    post)
+        echo "$(date): Resumed. Battery level: $(calculate_battery_percentage)% " >> $LOG_FILE
+	      echo  "$(calculate_drainage)" > /dev/kmsg
+        ;;
+esac
